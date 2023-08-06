@@ -1,0 +1,7 @@
+FileName	Strain	Experiment
+lpr-1_18	lpr	18
+lor-2_18	lpr	18
+lpr-3_18	lpr	18
+WT-1_18	WT	18
+WT-2_18	WT	18
+WT-3_18	WT	18

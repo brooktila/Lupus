@@ -1,0 +1,13 @@
+FileName	Strain	Experiment
+lpr-1_24	lpr	24
+lpr-2_24	lpr	24
+lpr-3_24	lpr	24
+lpr2-1_24	lpr2	24
+lpr2-2_24	lpr2	24
+lpr2-3_24	lpr2	24
+plus-1_24	plus	24
+plus-2_24	plus	24
+plus-3_24	plus	24
+WT-1_24	WT	24
+WT-2_24	WT	24
+WT-3_24	WT	24

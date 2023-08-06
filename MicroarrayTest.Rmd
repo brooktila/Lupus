@@ -1,0 +1,932 @@
+---
+title: "MicroarrayTest"
+output: html_document
+date: "2022-09-28"
+Author: Brook Tilahun
+---
+
+```{r}
+#download libraries
+
+#BioCManager is the package manager from Bioconductor. Allows for quick updating and installing of required packages
+if (!require("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+
+BiocManager::install(c("affy","affyPLM","limma","topGO","GOexpress","org.Mm.eg.db","mogene10stv1cdf","mogene10sttranscriptcluster.db","oligo","genefilter","Rgraphviz","geneplotter","stringr","Biobase","arrayQualityMetrics","annotate"))
+
+```
+
+```{r setup, include=FALSE}
+#Install Libraries
+library("tidyr")
+library("dplyr")
+library("ggplot2")
+library("gplots")
+library("listviewer")
+library("rvest")
+library("affy")
+library("affyPLM")
+library("limma")
+library("oligo")
+library("topGO")
+library("genefilter")
+library("Rgraphviz")
+library("geneplotter")
+library("stringr") 
+library("Biobase")
+library("arrayQualityMetrics")
+library("annotate")
+library("mogene10sttranscriptcluster.db")
+library("mogene10stv1cdf")
+library("GO.db")
+
+```
+
+#Background and Introduction
+Microarray expression profiling is one of several genetic approaches that provides insight into our molecular and systems understanding of development and functioning.
+The basic concept is that there are probes on a microarray plate that correspond with a specific genes of the organism. When the tissue is placed on the microarray after treatment there is hybridization between the probe and the gene. After scanning the microarray, one would get a file with the different affinities of bininding for each probeset.
+
+This is a smaller pilot data set that was run before the experiment there are TWO time points T-18 and T-24
+There are Four strains: LPR, LPR2, PLUS  and WT (WildType).
+
+Main question:
+-Compare MRL/MPJ domain with WT across the weeks.
+  -MRL/MPJ (LPR,LPR2,PLUS) is the Lupus disease model
+  
+Once you have performed the quality control check, you can proceed to normalize the data. Normalization is a necessary step because it ensures that the data is on the same scale, which is important for accurate comparison and analysis.
+
+After normalizing the data, you can perform statistical analysis to identify any patterns or trends in the data. This can include identifying differentially expressed genes, clustering genes based on expression levels, and performing hypothesis testing to determine the significance of any observed patterns.
+
+Once you have identified any patterns or trends in the data, you can interpret the results in the context of the biological system or question that you are studying. This may involve consulting relevant literature and discussing the results with other researchers in the field.
+
+We use Robust Multiarray Average (rma) to normalize the data:
+  -The calculation behind RMA involves first log-transforming the raw intensity values for each probe on each array. Next, the median log-intensity value is calculated for each probe across all arrays. This median value is then used to correct the log-intensity values for each probe on each array, by subtracting the median value from the log-intensity value for each probe.
+  
+  -After correcting for systematic biases, the data is then quantile-normalized to ensure that the data is on the same scale. This is done by ranking the log-intensity values for each probe on each array and then using a quantile-based method to adjust the values so that they have the same distribution across all arrays.
+  
+  -Finally, the data is inverse-log transformed to convert it back to the original intensity scale. This produces the final normalized data, which can then be used for further analysis.
+
+## Reference
+These resources have been used as inspiration to create a suitable pipeline for the micro array data analysis.
+
+https://wiki.bits.vib.be/index.php/Analyze_your_own_microarray_data_in_R/Bioconductor
+https://bioconductor.org/packages/release/workflows/vignettes/maEndToEnd/inst/doc/MA-Workflow.html#13_Gene_ontology_(GO)_based_enrichment_analysis
+https://bioconductor.org/packages/release/bioc/vignettes/topGO/inst/doc/topGO.pdf
+https://bioconductor.org/packages/release/bioc/manuals/ReactomePA/man/ReactomePA.pdf
+
+#T24
+Due to the differences in the number of samples available for each group across T18-24.
+We would need to do separate the analysis based on the time.
+ -There are only LPR and WT saples for T-18
+
+## load the data .cel files
+```{r}
+# Set the path to the directory containing the CEL files for T-24
+celpathT24 <- "/Users/brookt/R projects/LupusProject/2022 Analysis_MRL v C57/T-24"
+
+# Read the targets file for T-24
+targets24 <- readTargets("targetsT24.txt")
+
+# Create a list of the CEL files in the T-24 directory
+celFiles <- list.celfiles(celpathT24, full.name = TRUE)
+
+# Read the CEL files and create a raw data object
+rawData <- ReadAffy(verbose = FALSE, filenames = celFiles)
+
+# Normalize the data using RMA
+data.rma.norm <- affy::rma(rawData)
+
+# Set the column names of the normalized data to the sample names from the targets file
+colnames(data.rma.norm) <- row.names(targets24)
+```
+
+## Creating Proble Level Images
+You can create a probelevel image of the Microarray, if you are looking for specific patterns, EG: if you split a plate for samples
+```{r}
+Pset = fitPLM(rawData)
+```
+
+
+## Quick visualizations
+
+```{r}
+hist(rawData) # quick hist summary of log_difference
+hist(data.rma.norm)
+#image(rawData)# takes a bit of time loads images
+boxplot(rawData)
+boxplot(data.rma.norm)
+```
+
+
+## Annotation
+```{r}
+# Get the annotation data for the normalized data object
+data.rma.norm@annotation
+
+# Extract the expression values from the normalized data object
+rma <- exprs(data.rma.norm)
+
+# Get the probe names from the normalized data object
+probes <- featureNames(data.rma.norm)
+
+# Get the mogene10sttranscriptcluster database
+x <- mogene10sttranscriptcluster.db
+
+# Get the Symbol, Name, Entrez ID, and GO term for each probe
+Symbol = unlist(mget(probes, mogene10sttranscriptclusterSYMBOL, ifnotfound=NA))
+Name =  unlist(mget(probes, mogene10sttranscriptclusterGENENAME, ifnotfound=NA))
+Entrez_IDs = unlist(mget(probes, mogene10sttranscriptclusterENTREZID, ifnotfound=NA))
+GO = unlist(mget(probes, mogene10sttranscriptclusterGO, ifnotfound=NA))
+
+# Bind the probe names, symbols, names, entrez IDs, GO terms, and expression values together
+annotated <- cbind(probes, Symbol, Name, Entrez_IDs, GO, rma)
+
+# Create a data frame with the probe ID, symbol, name, and entrez ID, replacing NA values with actual NA
+tmp <- data.frame(ID=probes, Symbol=Symbol, Name=Name, Entrez_IDs, stringsAsFactors=F)
+tmp[tmp=="NA"] <- NA
+
+# Set the annotation data of the normalized data object to the new data frame
+fData(data.rma.norm) <- tmp
+
+# Write the annotated data to a file
+write.table(annotated, file = "annotation.txt", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+```
+
+```{r}
+head(exprs(data.rma.norm))
+plotMDS(data.rma.norm) #checking batch effect
+
+#remove probe sets with No Names
+HasSymbol <- !is.na(fData(data.rma.norm)$Symbol)
+data.rma.norm <- data.rma.norm[HasSymbol,]
+head(fData(data.rma.norm))
+dim(data.rma.norm)
+fData(data.rma.norm)$Symbol
+```
+
+## LIMMA differential analysis groups
+following: https://www.bioconductor.org/packages/devel/bioc/vignettes/limma/inst/doc/usersguide.pdf @ Page 102
+model matrices: https://www.montana.edu/rotella/documents/502/DesignMatricesR.pdf
+                
+```{r}
+#Differential expression
+Exp <- factor(targets24$Experiment, levels = c ("24"))
+Strain <- factor(targets24$Strain, levels=c("lpr","lpr2","plus","WT"))
+design<- model.matrix(~0 + Strain )
+design
+```
+
+
+```{r}
+fit <- lmFit(data.rma.norm, design)
+fit <- eBayes(fit, trend=TRUE, robust=TRUE) # the compute moderated t-statistics, moderated F-statistic, and log-odds of differential expression by empirical Bayes moderation of the standard errors towards a global value. 
+results <- decideTests(fit)
+summary(results)
+
+```
+
+
+
+```{r}
+design
+colnames(design)[1] <- c("lpr18")
+colnames(design)[2] <- c("lpr218")
+colnames(design)[3] <- c("Plus18")
+colnames(design)[4] <- c("WT18")
+colnames(design)[5] <- c("lpr24")
+colnames(design)[6] <- c("lpr224")
+colnames(design)[7] <- c("Plus24")
+colnames(design)[8] <- c("WT24")
+```
+
+
+```{r include=FALSE}
+
+# Create a contrast matrix for the strains
+contrast.matrix = makeContrasts("Strainlpr-Strainlpr2","Strainlpr-Strainplus","Strainlpr-StrainWT","Strainlpr2-Strainplus","Strainlpr2-StrainWT","Strainplus-StrainWT", levels = design)
+
+# Fit the contrasts to the data
+data.fit.con = contrasts.fit(fit, contrast.matrix)
+
+# Use empirical Bayes to estimate the variances for the contrasts
+data.fit.eb = eBayes(data.fit.con)
+
+# Use the moderated t-statistic to decide which contrasts are significant
+results <- decideTests(data.fit.eb)
+```
+
+```{r}
+summary(results)
+```
+
+
+```{r}
+genesT24lpr2_wt<- topTable(data.fit.eb, coef="Strainlpr2-StrainWT", n=Inf, lfc = 1.5)
+genesT24lpr_lpr2<- topTable(data.fit.eb, coef="Strainlpr-Strainlpr2", n=Inf, lfc = 1.5)
+genesT24lpr_plus<- topTable(data.fit.eb, coef="Strainlpr-Strainplus", n=Inf, lfc = 1.5)
+genesT24lpr_WT<- topTable(data.fit.eb, coef="Strainlpr-StrainWT", n=Inf, lfc = 1.5)
+genesT24lpr2_plus<- topTable(data.fit.eb, coef="Strainlpr2-Strainplus", n=Inf, lfc = 1.5)
+genesT24plus_WT<- topTable(data.fit.eb, coef="Strainplus-StrainWT", n=Inf, lfc = 1.5)
+```
+
+#T18
+## load the data .cel files
+```{r}
+celpathT18 <- "/Users/hp/R projects/LupusProject/2022 Analysis_MRL v C57/T-18"
+targets18<- readTargets("targetsT18.txt")
+celFiles <- list.celfiles(celpathT18,full.name=TRUE)
+rawDataT18 <- ReadAffy(verbose = FALSE, filenames = celFiles)
+data.rma.normT18 <- affy::rma(rawDataT18)
+colnames(data.rma.normT18) <- row.names(targets18)
+```
+
+## Quick visualizations
+
+```{r}
+hist(rawDataT18) # quick hist summary of log_difference
+hist(data.rma.normT18)
+#image(rawData)# takes a bit of time loads images
+boxplot(rawDataT18)
+boxplot(data.rma.normT18)
+```
+
+
+## Annotation
+```{r}
+
+
+data.rma.normT18@annotation
+rmaT18<- exprs(data.rma.normT18)
+probes=featureNames(data.rma.normT18)
+
+x<- mogene10sttranscriptcluster.db
+
+Symbol = unlist(mget(probes, mogene10sttranscriptclusterSYMBOL, ifnotfound=NA))
+Name =  unlist(mget(probes, mogene10sttranscriptclusterGENENAME, ifnotfound=NA))
+Entrez_IDs = unlist(mget(probes, mogene10sttranscriptclusterENTREZID, ifnotfound=NA))
+GO = unlist(mget(probes, mogene10sttranscriptclusterGO2PROBE, ifnotfound=NA))
+Description = unlist(mget(probes, mogene10sttranscriptclusterPATH, ifnotfound=NA))
+annotatedT18<-cbind(probes,Symbol,Name,Entrez_IDs,GO,rmaT18)
+
+
+tmp<- data.frame(ID=probes, Symbol=Symbol, Name=Name,Entrez_IDs, stringsAsFactors=F)
+tmp[tmp=="NA"] <- NA
+
+fData(data.rma.normT18) <- tmp
+
+
+write.table(annotatedT18, file = "annotationT18.txt", quote = FALSE, sep = "\t", row.names = FALSE, col.names = TRUE)
+```
+
+```{r}
+head(exprs(data.rma.normT18))
+plotMDS(data.rma.normT18) #checking batch effect
+
+#remove probe sets with No Names
+HasSymbol <- !is.na(fData(data.rma.normT18)$Symbol)
+data.rma.normT18 <- data.rma.normT18[HasSymbol,]
+head(fData(data.rma.normT18))
+dim(data.rma.normT18)
+```
+
+## LIMMA differential analysis groups
+following: https://www.bioconductor.org/packages/devel/bioc/vignettes/limma/inst/doc/usersguide.pdf @ Page 102
+model matrices: https://www.montana.edu/rotella/documents/502/DesignMatricesR.pdf
+                
+```{r}
+#Differential expression
+#Exp18 <- factor(targets$Experiment, levels = c ("18"))
+Strain18 <- factor(targets18$Strain, levels=c("lpr","WT"))
+design18<- model.matrix(~0 + Strain18 )
+design18
+```
+
+
+```{r}
+fit18 <- lmFit(data.rma.normT18, design18)
+fit18 <- eBayes(fit18, trend=TRUE, robust=TRUE) # the compute moderated t-statistics, moderated F-statistic, and log-odds of differential expression by empirical Bayes moderation of the standard errors towards a global value. 
+results18 <- decideTests(fit18)
+summary(results18)
+```
+
+
+
+```{r include=FALSE}
+contrast.matrix18 = makeContrasts("Strain18lpr-Strain18WT",levels=design18)
+data.fit.con = contrasts.fit(fit18,contrast.matrix18)
+data.fit.eb18 = eBayes(data.fit.con)
+results18 <- decideTests(data.fit.eb18)
+```
+
+
+```{r}
+summary(results18)
+
+
+genesT18lpr_wt<-topTable(data.fit.eb18, coef="Strain18lpr-Strain18WT", n=Inf, lfc = 1.5) #St.dev
+```
+
+
+```{r}
+writexl::write_xlsx(genesT18lpr_wt,"/Users/hp/Downloads/genesT18lpr_wt.xlsx" )
+exprsraw<-exprs(rawDataT18)
+exprsraw<- as.data.frame(exprsraw)
+rmaT18<- as.data.frame(rmaT18)
+probes<- as.data.frame(probes)
+rmaT18<- cbind(probes,rmaT18)
+writexl::write_xlsx(rmaT18,"/Users/hp/Downloads/rmaT18.xlsx" )
+```
+
+
+#Volcano plots:
+
+##T24
+```{r}
+volcanoplot(data.fit.eb)
+```
+
+```{r}
+signif_genes <- topTable(data.fit.eb,number=Inf,p.value = 0.1,lfc=1.5)#log fold change > 2 and < 0.05 signif 
+signif_genes 
+```
+
+```{r}
+volcanoplot(data.fit.eb, coef=2, main=sprintf("%d features pass our cutoffs",nrow(signif_genes)))
+points(signif_genes[['logFC']],-log10(signif_genes[['P.Value']]),col= RED)
+```
+
+```{r}
+contrast.matrix = makeContrasts("Strainlpr-StrainWT","Strainlpr2-StrainWT","Strainplus-StrainWT",levels=design)
+data.fit.con.venn = contrasts.fit(fit,contrast.matrix)
+data.fit.eb.venn = eBayes(data.fit.con.venn)
+results.venn <- decideTests(data.fit.eb.venn)
+vennDiagram(results.venn)
+```
+
+##T18
+```{r}
+volcanoplot(data.fit.eb18)
+```
+
+```{r}
+signif_genes18 <- topTable(data.fit.eb18,number=Inf,p.value = 0.1,lfc=1.5)#log fold change > 2 and < 0.05 signif 
+signif_genes18
+```
+
+```{r}
+volcanoplot(data.fit.eb18, main=sprintf("%d features pass our cutoffs",nrow(signif_genes18)),
++ points(signif_genes18[['logFC']],-log10(signif_genes18[['P.Value']]),col= "RED"))
+```
+
+```{r}
+vennDiagram(results18)
+```
+
+#Heat Map:
+##T24
+
+```{r}
+cgenesT24lpr2_wt<- na.omit(genesT24lpr2_wt)
+cgenesT24lpr_lpr2<- na.omit(genesT24lpr_lpr2)
+cgenesT24lpr_plus<- na.omit(genesT24lpr_plus)
+cgenesT24lpr_WT<- na.omit(genesT24lpr_WT)
+cgenesT24lpr2_plus<- na.omit(genesT24lpr2_plus)
+cgenesT24plus_WT<- na.omit(genesT24plus_WT)
+```
+
+```{r}
+
+diffexpIDs <- as.character(topTable(data.fit.eb,number=222,lfc=1.5)$ID)
+r2<-as.character(topTable(data.fit.eb,number=222,lfc=1.5)$Symbol)
+diffexprows <- which(featureNames(data.rma.norm)%in% diffexpIDs)
+normexprs<-exprs(data.rma.norm)
+heatmap(normexprs[diffexprows,],col=greenred(100),scale="row", labRow = c(r2))
+```
+
+
+##T18
+
+```{r}
+cgenesT18lpr_wt<- na.omit(genesT18lpr_wt)
+```
+
+```{r}
+
+diffexpIDs <- as.character(topTable(data.fit.eb18,number=25,lfc=1.5)$ID)
+r1<-as.character(topTable(data.fit.eb18,number=25,lfc=1.5)$Symbol)
+diffexprows <- which(featureNames(data.rma.normT18)%in% diffexpIDs)
+normexprs<-exprs(data.rma.normT18)
+heatmap(normexprs[diffexprows,],col=greenred(100),scale="row", labRow = c(r1))
+
+```
+
+#Biological interpretation of differential expression
+##T24
+
+### topGO
+```{r}
+
+table_CD<- topTable(data.fit.eb, coef="Strainlpr2-StrainWT", n=Inf)
+DE_genes_CD<- subset(table_CD, adj.P.Val < 0.1)$ID
+back_genes_idx <- genefilter::genefinder(data.rma.norm, 
+                                        as.character(DE_genes_CD), 
+                                        method = "manhattan", scale = "none")
+back_genes_idx <- sapply(back_genes_idx, function(x)x$indices)
+back_genes <- featureNames(data.rma.norm)[back_genes_idx]
+back_genes <- setdiff(back_genes, DE_genes_CD)
+
+    
+intersect(back_genes, DE_genes_CD)
+length(back_genes)
+```
+
+```{r}
+multidensity(list(
+        all = table_CD[,"AveExpr"] ,
+        fore = table_CD[DE_genes_CD , "AveExpr"],
+        back = table_CD[rownames(table_CD) %in% back_genes, "AveExpr"]),
+        col = c("#e46981", "#ae7ee2", "#a7ad4a"),
+     xlab = "mean expression",
+   main = "DE genes for CD-background-matching")
+```
+
+```{r}
+gene_IDs <- rownames(table_CD)
+in_universe <- gene_IDs %in% c(DE_genes_CD, back_genes)
+in_selection <- gene_IDs %in% DE_genes_CD 
+
+all_genes <- in_selection[in_universe]
+all_genes <- factor(as.integer(in_selection[in_universe]))
+names(all_genes) <- gene_IDs[in_universe] 
+##look at fold change parameter
+```
+
+```{r}
+top_GO_data <- new("topGOdata", ontology = "BP", allGenes = all_genes,
+ nodeSize = 10, annot = annFUN.db, affyLib = "mogene10sttranscriptcluster.db")
+```
+
+```{r}
+#Cutoffs at p=0.01 by default
+result_top_GO_elim <- 
+  runTest(top_GO_data, algorithm = "elim", statistic = "Fisher")
+result_top_GO_classic <- 
+  runTest(top_GO_data, algorithm = "classic", statistic = "Fisher")
+```
+
+```{r}
+res_top_GO <- GenTable(top_GO_data, Fisher.elim = result_top_GO_elim,
+        Fisher.classic = result_top_GO_classic,
+        orderBy = "Fisher.elim" , topNodes = 100)
+
+genes_top_GO <- printGenes(top_GO_data, whichTerms = res_top_GO$GO.ID,
+    chip = "mogene10sttranscriptcluster.db", geneCutOff = 1000)
+
+
+res_top_GO$sig_genes <- sapply(genes_top_GO, function(x){
+                str_c(paste0(x[x$'raw p-value' == 2, "Symbol.id"],";"), 
+                      collapse = "")
+    })
+
+head(res_top_GO[,1:8], 100)
+```
+
+```{r}
+showSigOfNodes(top_GO_data, score(result_top_GO_elim), firstSigNodes = 10,useInfo = 'def')
+printGraph(top_GO_data, result_top_GO_elim, firstSigNodes = 5, fn.prefix = "Strainlpr2-StrainWT", useInfo = "all", pdfSW = TRUE)
+```
+
+
+###Reactome
+
+###GO
+
+```{r}
+len<-length(cgenesT24lpr2_wt$ID)
+go1<-mget(c(cgenesT24lpr2_wt$ID), envir=mogene10sttranscriptclusterGO)
+names(go1)<-c(cgenesT24lpr2_wt$Symbol)
+jsonedit(go1)
+```
+
+```{r}
+df <- data.frame(gene=vector("character",0),
+                 GOID=vector("character",0),
+                 term=vector("character",0))
+ 
+for(index1 in 1:length(go1)) {
+  for(index2 in 1:length(go1[[index1]])) {
+    GIDs<- names(go1[[index1]])[[index2]]
+    df <- rbind(df,c(names(go1)[[index1]],names(go1[[index1]])[[index2]],(go1[[index1]][[index2]]["Ontology"][[1]])))
+  }
+}
+
+text.vec <- vector()
+GIDs<- df[,c(2)]
+
+for (ii in 1:length(GIDs)) {
+    tryCatch({
+           string <- paste0("http://amigo.geneontology.org/amigo/term/",GIDs[ii])
+           text.vec[ii] <- read_html(string) %>% html_nodes(xpath='/html/body/div[2]/div[1]/h1')%>%             html_text()
+              }, error=function(e){})
+} 
+text.vec
+df <- cbind(df,text.vec)
+ago1<- df
+```
+
+```{r}
+len<-length(cgenesT24lpr_lpr2$ID)
+go2<-mget(c(cgenesT24lpr_lpr2$ID), envir=mogene10sttranscriptclusterGO)
+names(go2)<-c(cgenesT24lpr_lpr2$Symbol)
+jsonedit(go2)
+```
+
+```{r}
+df <- data.frame(gene=vector("character",0),
+                 GOID=vector("character",0),
+                 term=vector("character",0))
+
+for(index1 in 1:length(go2)) {
+  for(index2 in 1:length(go2[[index1]])) {
+    GIDs<- names(go2[[index1]])[[index2]]
+    df <- rbind(df,c(names(go2)[[index1]],names(go2[[index1]])[[index2]],(go2[[index1]][[index2]]["Ontology"][[1]])))
+  }
+}
+
+text.vec <- vector()
+GIDs<- df[,c(2)]
+for (ii in 1:length(GIDs)) {
+    tryCatch({
+           string <- paste0("http://amigo.geneontology.org/amigo/term/",GIDs[ii])
+           text.vec[ii] <- read_html(string) %>% html_nodes(xpath='/html/body/div[2]/div[1]/h1')%>%             html_text()
+              }, error=function(e){})
+} 
+df <- cbind(df,text.vec)
+ago2<- df
+```
+
+```{r}
+len<-length(cgenesT24lpr_plus$ID)
+go3<-mget(c(cgenesT24lpr_plus$ID), envir=mogene10sttranscriptclusterGO)
+names(go3)<-c(cgenesT24lpr_plus$Symbol)
+jsonedit(go3)
+```
+
+
+```{r}
+df <- data.frame(gene=vector("character",0),
+                 GOID=vector("character",0),
+                 term=vector("character",0))
+
+for(index1 in 1:length(go3)) {
+  for(index2 in 1:length(go3[[index1]])) {
+    GIDs<- names(go3[[index1]])[[index2]]
+    df <- rbind(df,c(names(go3)[[index1]],names(go3[[index1]])[[index2]],(go3[[index1]][[index2]]["Ontology"][[1]])))
+  }
+}
+
+text.vec <- vector()
+GIDs<- df[,c(2)]
+for (ii in 1:length(GIDs)) {
+    tryCatch({
+           string <- paste0("http://amigo.geneontology.org/amigo/term/",GIDs[ii])
+           text.vec[ii] <- read_html(string) %>% html_nodes(xpath='/html/body/div[2]/div[1]/h1')%>%             html_text()
+              }, error=function(e){})
+} 
+
+df <- cbind(df,text.vec)
+ago3<- df
+```
+
+```{r}
+len<-length(cgenesT24lpr_WT$ID)
+go4<-mget(c(cgenesT24lpr_WT$ID), envir=mogene10sttranscriptclusterGO)
+names(go4)<-c(cgenesT24lpr_WT$Symbol)
+jsonedit(go4)
+```
+
+
+```{r}
+df <- data.frame(gene=vector("character",0),
+                 GOID=vector("character",0),
+                 term=vector("character",0))
+
+for(index1 in 1:length(go4)) {
+  for(index2 in 1:length(go4[[index1]])) {
+    GIDs<- names(go4[[index1]])[[index2]]
+    df <- rbind(df,c(names(go4)[[index1]],names(go4[[index1]])[[index2]],(go4[[index1]][[index2]]["Ontology"][[1]])))
+  }
+}
+
+text.vec <- vector()
+GIDs<- df[,c(2)]
+for (ii in 1:length(GIDs)) {
+    tryCatch({
+           string <- paste0("http://amigo.geneontology.org/amigo/term/",GIDs[ii])
+           text.vec[ii] <- read_html(string) %>% html_nodes(xpath='/html/body/div[2]/div[1]/h1')%>%             html_text()
+              }, error=function(e){})
+} 
+
+df <- cbind(df,text.vec)
+ago4<- df
+```
+
+```{r}
+len<-length(cgenesT24lpr2_plus$ID)
+go5<-mget(c(cgenesT24lpr2_plus$ID), envir=mogene10sttranscriptclusterGO)
+names(go5)<-c(cgenesT24lpr2_plus$Symbol)
+jsonedit(go5)
+```
+
+
+```{r}
+df <- data.frame(gene=vector("character",0),
+                 GOID=vector("character",0),
+                 term=vector("character",0))
+
+for(index1 in 1:length(go5)) {
+  for(index2 in 1:length(go5[[index1]])) {
+    GIDs<- names(go5[[index1]])[[index2]]
+    df <- rbind(df,c(names(go5)[[index1]],names(go5[[index1]])[[index2]],(go5[[index1]][[index2]]["Ontology"][[1]])))
+  }
+}
+
+text.vec <- vector()
+GIDs<- df[,c(2)]
+for (ii in 1:length(GIDs)) {
+    tryCatch({
+           string <- paste0("http://amigo.geneontology.org/amigo/term/",GIDs[ii])
+           text.vec[ii] <- read_html(string) %>% html_nodes(xpath='/html/body/div[2]/div[1]/h1')%>%             html_text()
+              }, error=function(e){})
+} 
+
+df <- cbind(df,text.vec)
+ago5<- df
+```
+
+```{r}
+len<-length(cgenesT24plus_WT$ID)
+go6<-mget(c(cgenesT24plus_WT$ID), envir=mogene10sttranscriptclusterGO)
+names(go6)<-c(cgenesT24plus_WT$Symbol)
+jsonedit(go6)
+```
+
+
+```{r}
+df <- data.frame(gene=vector("character",0),
+                 GOID=vector("character",0),
+                 term=vector("character",0))
+
+for(index1 in 1:length(go6)) {
+  for(index2 in 1:length(go6[[index1]])) {
+    GIDs<- names(go6[[index1]])[[index2]]
+    df <- rbind(df,c(names(go6)[[index1]],names(go6[[index1]])[[index2]],(go6[[index1]][[index2]]["Ontology"][[1]])))
+  }
+}
+
+text.vec <- vector()
+GIDs<- df[,c(2)]
+for (ii in 1:length(GIDs)) {
+    tryCatch({
+           string <- paste0("http://amigo.geneontology.org/amigo/term/",GIDs[ii])
+           text.vec[ii] <- read_html(string) %>% html_nodes(xpath='/html/body/div[2]/div[1]/h1')%>%             html_text()
+              }, error=function(e){})
+} 
+
+df <- cbind(df,text.vec)
+ago6<- df
+```
+
+###Ncbi Summary
+```{r}
+EIDs<- cgenesT24lpr2_wt$Entrez_IDs
+text.vec <- vector()
+for (ii in 1:length(EIDs)) {
+  tryCatch({
+  string <- paste0("https://www.ncbi.nlm.nih.gov/gene/?term=",EIDs[ii])
+  text.vec[ii] <- read_html(string) %>% html_nodes(xpath='//*[@id="summaryDl"]/dd[10]')%>% html_text()
+}, error=function(e){})
+} 
+cgenesT24lpr2_wt <- cbind(cgenesT24lpr2_wt,text.vec)
+
+```
+
+```{r}
+EIDs<- cgenesT24lpr_lpr2$Entrez_IDs
+text.vec <- vector()
+for (ii in 1:length(EIDs)) {
+  tryCatch({
+  string <- paste0("https://www.ncbi.nlm.nih.gov/gene/?term=",EIDs[ii])
+  text.vec[ii] <- read_html(string) %>% html_nodes(xpath='//*[@id="summaryDl"]/dd[10]')%>% html_text()
+}, error=function(e){})
+} 
+cgenesT24lpr_lpr2 <- cbind(cgenesT24lpr_lpr2,text.vec)
+
+```
+
+```{r}
+EIDs<- cgenesT24lpr_plus$Entrez_IDs
+text.vec <- vector()
+for (ii in 1:length(EIDs)) {
+  tryCatch({
+  string <- paste0("https://www.ncbi.nlm.nih.gov/gene/?term=",EIDs[ii])
+  text.vec[ii] <- read_html(string) %>% html_nodes(xpath='//*[@id="summaryDl"]/dd[10]')%>% html_text()
+}, error=function(e){})
+} 
+cgenesT24lpr_plus<- cbind(cgenesT24lpr_plus,text.vec)
+
+```
+
+```{r}
+EIDs<- cgenesT24lpr_WT$Entrez_IDs
+text.vec <- vector()
+for (ii in 1:length(EIDs)) {
+  tryCatch({
+  string <- paste0("https://www.ncbi.nlm.nih.gov/gene/?term=",EIDs[ii])
+  text.vec[ii] <- read_html(string) %>% html_nodes(xpath='//*[@id="summaryDl"]/dd[10]')%>% html_text()
+}, error=function(e){})
+} 
+cgenesT24lpr_WT<- cbind(cgenesT24lpr_WT,text.vec)
+
+```
+
+```{r}
+EIDs<- cgenesT24lpr2_plus$Entrez_IDs
+text.vec <- vector()
+for (ii in 1:length(EIDs)) {
+  tryCatch({
+  string <- paste0("https://www.ncbi.nlm.nih.gov/gene/?term=",EIDs[ii])
+  text.vec[ii] <- read_html(string) %>% html_nodes(xpath='//*[@id="summaryDl"]/dd[10]')%>% html_text()
+}, error=function(e){})
+} 
+cgenesT24lpr2_plus <- cbind(cgenesT24lpr2_plus,text.vec)
+
+```
+
+```{r}
+EIDs<- cgenesT24plus_WT$Entrez_IDs
+text.vec <- vector()
+for (ii in 1:length(EIDs)) {
+  tryCatch({
+  string <- paste0("https://www.ncbi.nlm.nih.gov/gene/?term=",EIDs[ii])
+  text.vec[ii] <- read_html(string) %>% html_nodes(xpath='//*[@id="summaryDl"]/dd[10]')%>% html_text()
+}, error=function(e){})
+} 
+cgenesT24plus_WT <- cbind(cgenesT24plus_WT,text.vec)
+
+```
+
+
+
+
+
+
+##T18
+
+###topGO
+
+```{r}
+
+table_CD<- topTable(data.fit.eb18, coef="Strain18lpr-Strain18WT", n=Inf)
+DE_genes_CD<- subset(table_CD, adj.P.Val < 0.1)$ID
+back_genes_idx <- genefilter::genefinder(data.rma.normT18, 
+                                        as.character(DE_genes_CD), 
+                                        method = "manhattan", scale = "none")
+back_genes_idx <- sapply(back_genes_idx, function(x)x$indices)
+back_genes <- featureNames(data.rma.normT18)[back_genes_idx]
+back_genes <- setdiff(back_genes, DE_genes_CD)
+
+    
+intersect(back_genes, DE_genes_CD)
+length(back_genes)
+```
+
+```{r}
+multidensity(list(
+        all = table_CD[,"AveExpr"] ,
+        fore = table_CD[DE_genes_CD , "AveExpr"],
+        back = table_CD[rownames(table_CD) %in% back_genes, "AveExpr"]),
+        col = c("#e46981", "#ae7ee2", "#a7ad4a"),
+     xlab = "mean expression",
+   main = "DE genes for CD-background-matching")
+```
+
+```{r}
+gene_IDs <- rownames(table_CD)
+in_universe <- gene_IDs %in% c(DE_genes_CD, back_genes)
+in_selection <- gene_IDs %in% DE_genes_CD 
+
+all_genes <- in_selection[in_universe]
+all_genes <- factor(as.integer(in_selection[in_universe]))
+names(all_genes) <- gene_IDs[in_universe] 
+
+top_GO_data <- new("topGOdata", ontology = "BP", allGenes = all_genes,
+ nodeSize = 10, annot = annFUN.db, affyLib = "mogene10sttranscriptcluster.db")
+
+#Cutoffs at p=0.01 by default
+result_top_GO_elim <- 
+  runTest(top_GO_data, algorithm = "elim", statistic = "Fisher")
+result_top_GO_classic <- 
+  runTest(top_GO_data, algorithm = "classic", statistic = "Fisher")
+
+res_top_GO <- GenTable(top_GO_data, Fisher.elim = result_top_GO_elim,
+        Fisher.classic = result_top_GO_classic,
+        orderBy = "Fisher.elim" , topNodes = 100)
+
+genes_top_GO <- printGenes(top_GO_data, whichTerms = res_top_GO$GO.ID,
+    chip = "mogene10sttranscriptcluster.db", geneCutOff = 1000)
+
+
+res_top_GO$sig_genes <- sapply(genes_top_GO, function(x){
+                str_c(paste0(x[x$'raw p-value' == 2, "Symbol.id"],";"), 
+                      collapse = "")
+    })
+
+head(res_top_GO[,1:8], 100)
+```
+Rectangle color represents the relative significant, ranging from dark red (most significant) to bright yellow (least significant).
+```{r}
+#Rectangle color represents the relative significane, ranging from dark red (most significant) to bright yellow (least significant).
+showSigOfNodes(top_GO_data, score(result_top_GO_elim), firstSigNodes = 10,useInfo = 'def')
+printGraph(top_GO_data, result_top_GO_elim, firstSigNodes = 5, fn.prefix = "Strain18lpr-Strain18WT_T18", useInfo = "all", pdfSW = TRUE)
+```
+
+
+###GO
+```{r}
+
+len<-length(cgenesT18lpr_wt$ID)
+go<-mget(c(cgenesT18lpr_wt$ID), envir=mogene10sttranscriptclusterGO)
+names(go)<-c(cgenesT18lpr_wt$Symbol)
+jsonedit(go)
+```
+
+
+```{r}
+df <- data.frame(gene=vector("character",0),
+                 GOID=vector("character",0),
+                 term=vector("character",0))
+
+for(index1 in 1:length(go)) {
+  for(index2 in 1:length(go[[index1]])) {
+    GIDs<- names(go[[index1]])[[index2]]
+    df <- rbind(df,c(names(go)[[index1]],names(go[[index1]])[[index2]],(go[[index1]][[index2]]["Ontology"][[1]])))
+  }
+}
+
+text.vec <- vector()
+GIDs<- df[,c(2)]
+for (ii in 1:length(GIDs)) {
+    tryCatch({
+           string <- paste0("http://amigo.geneontology.org/amigo/term/",GIDs[ii])
+           text.vec[ii] <- read_html(string) %>% html_nodes(xpath='/html/body/div[2]/div[1]/h1')%>%             html_text()
+              }, error=function(e){})
+} 
+
+df <- cbind(df,text.vec)
+ago<- df
+```
+
+
+### Ncbi Summary
+```{r}
+
+
+EIDs<- cgenesT18lpr_wt$Entrez_IDs
+
+text.vec <- vector()
+
+for (ii in 1:length(EIDs)) {
+  tryCatch({
+  string <- paste0("https://www.ncbi.nlm.nih.gov/gene/?term=",EIDs[ii])
+  text.vec[ii] <- read_html(string) %>% html_nodes(xpath='//*[@id="summaryDl"]/dd[10]')%>% html_text()
+}, error=function(e){})
+} 
+
+```
+
+```{r}
+cgenesT18lpr_wt <- cbind(cgenesT18lpr_wt,text.vec)
+```
+
+#Exporting the Data
+Here we export the data as an Excel file for ease of access for further investigations. 
+
+```{r}
+ago$source<- rep(c("genesT18lpr_wt"), nrow(ago))
+ago1$source<- rep(c("genesT24lpr2_wt"), nrow(ago1))
+ago2$source<- rep(c("genesT24lpr_lpr2"), nrow(ago2))
+ago3$source<- rep(c("genesT24lpr_plus"), nrow(ago3))
+ago4$source<- rep(c("genesT24lpr_WT"), nrow(ago4))
+ago5$source<- rep(c("genesT24lpr2_plus"), nrow(ago5))
+ago6$source<- rep(c("genesT24plus_WT"), nrow(ago6))
+colnames(ago6)[1] = "Name"
+colnames(ago6)[2] = "Ontology"
+colnames(ago6)[3] = "Function"
+colnames(ago6)[4] = "Description"
+AnnotatedGO<- rbind(ago,ago1,ago2,ago3,ago4,ago5,ago6)
+writexl::write_xlsx(AnnotatedGO,"/Users/hp/Downloads/AnnotatedGO.xlsx" )
+```
+
+
+

@@ -1,0 +1,1184 @@
+---
+title: "Microarray-96peg"
+output: html_document
+date: "2022-11-21"
+Author: Brook Tilahun
+---
+
+```{r setup, include=FALSE}
+#BiocManager::install("enrichplot")
+
+library("tidyr")
+library("dplyr")
+library("ggplot2")
+library("gplots")
+library("parallel")
+library("listviewer")
+library("rvest")
+library("affy")
+library("affyPLM")
+library("limma")
+library("oligo")
+library("topGO")
+library("genefilter")
+library("Rgraphviz")
+library("stringr") 
+library("Biobase")
+library("arrayQualityMetrics")
+library("httr")
+library("RCurl")
+library("annotate")
+library("mogene11sttranscriptcluster.db")
+library("GO.db")
+library("cancerTiming")
+library("ReactomePA")
+library("enrichplot")
+```
+
+# Load the data
+This Data is a bigger data set with 96 micro arrays files for analysis. The experiment conditions are also different.
+- There is no WT strain
+- Plus serves as a within strain control
+- There are unequal number of samples per group
+
+```{r include=FALSE}
+celpath<- "/Users/brookt/R projects/LupusProject/Lupus Data-Microarray-96peg-12.11"
+targets<- readTargets("targets.txt")
+celFiles <- list.celfiles(celpath,full.name=TRUE)
+rawData <- read.celfiles(celFiles)
+pData(rawData)$filename <- targets$Filename
+pData(rawData)$Strain<- targets$Strain
+pData(rawData)$Tissue<- targets$Tissue
+pData(rawData)$Subject<- targets$Subject
+pData(rawData)$Weeks<- targets$Weeks
+
+pData(rawData)
+
+```
+# Preprocessing
+## QC
+'Array quality metrics' package provides us with a repeatable qc metrics. It looks at the quality of our files in terms of bias from experiment and confounding variables.
+
+The output is saved as an HTML file in the working directory.
+
+
+```{r}
+
+# arrayQualityMetrics(expressionset = rawData,
+#     outdir = "/Users/hp/R projects/LupusProject",
+#     force = TRUE, do.logtransform = TRUE,
+#     intgroup = c("Strain", "Tissue", "Weeks"))
+
+```
+
+
+## Quick visulaization
+Once we've loaded up the data we can look at the distribution of the expressions across all samples using a box plot. The arrayqualitymetrics package provides us with insight into what celfiles are not within the range of the majority.
+
+```{r}
+boxplot(rawData,target="core") # choose the level of summarization: "core"
+```
+
+```{r include=FALSE}
+norm.data <- oligo::rma(rawData) #Normalize the data using Oligo RMA because this Microarray is a more updated version and requires a different algorithm than affy and the ST10 cluster.
+```
+
+After normalizing the data set using RMA algorithm we can see that the expressions follow a more normal distribution.
+
+```{r}
+boxplot(norm.data, target= "core")
+```
+
+## Annotation
+
+We will annotate the probesets using the 'mogene11sttranscriptcluster' database. This database was created using the probset information from affymetirix and can be downloaded from Bioconductor.
+We will annotate the data with the Gene Symbol, Name, Entrez ID, Gene Ontology & Description. And save those with the featuredata.
+
+```{r include=FALSE}
+norm.data@annotation #verify that the microarray is the same version as the annotation DB
+rma<- exprs(norm.data) #save the expression data as a table
+probes=featureNames(norm.data) #extract the probenames
+x<- mogene11sttranscriptcluster.db
+Symbol = unlist(mget(probes, mogene11sttranscriptclusterSYMBOL, ifnotfound=NA)) #match probe and save Symbol
+Name =  unlist(mget(probes, mogene11sttranscriptclusterGENENAME, ifnotfound=NA)) #match probe and save Name
+Entrez_IDs = unlist(mget(probes, mogene11sttranscriptclusterENTREZID, ifnotfound=NA)) #match probe and save Entrez ID
+GO = unlist(mget(probes, mogene11sttranscriptclusterGO, ifnotfound=NA)) #match probe and save Gene Ontology
+Description = unlist(mget(probes, mogene11sttranscriptclusterPATH, ifnotfound=NA)) #match probe and save Description
+annotated<-cbind(probes,Symbol,Name,Entrez_IDs,GO,rma)
+
+tmp<- data.frame(ID=probes, Symbol=Symbol, Name=Name,Entrez_IDs, stringsAsFactors=F)
+tmp[tmp=="NA"] <- NA
+fData(norm.data) <- tmp
+fData(norm.data)
+```
+
+We choose not to remove probes with no annotation at this stage. However, in further analysis we will remove them. 
+If you wanted to remove them now the chunck below does so. 
+
+```{r eval=FALSE, include=FALSE}
+#remove probe sets with No Names
+# HasSymbol <- !is.na(fData(data.rma.norm)$Symbol)
+# data.rma.norm <- data.rma.norm[HasSymbol,]
+# head(fData(data.rma.norm))
+# dim(data.rma.norm)
+# fData(data.rma.norm)$Symbol
+```
+
+There is a considerable amount of batch effect. But it is hard to determine if this is from experiment error or if it is from the difference in tissues. i.e, it could be batch effect due to biological difference. 
+
+```{r}
+plotMDS(norm.data) #checking batch effect
+```
+
+## PCA raw vs normalized data
+In the pca from the array quality metrics we noticed that there was significant groping of the celfiles based on pc1 and pc2 we will replicate the PCA plot and compare it with the normalized data. 
+```{r echo=FALSE}
+exp_data<- exprs(norm.data)
+PCA <- prcomp(t(exp_data), scale = FALSE)
+
+percentVar <- round(100*PCA$sdev^2/sum(PCA$sdev^2),1)
+sd_ratio <- sqrt(percentVar[2] / percentVar[1])
+
+dataGG <- data.frame(PC1 = PCA$x[,1], PC2 = PCA$x[,2],
+                    Strain =pData(norm.data)$Strain,
+                    Week =pData(norm.data)$Week)
+
+ggplot(dataGG, aes(PC1, PC2)) +
+      geom_point(aes(colour =  factor(Week), shape =  Strain)) +
+  ggtitle("PCA plot of the calibrated, summarized data") +
+  xlab(paste0("PC1, VarExp: ", percentVar[1], "%")) +
+  ylab(paste0("PC2, VarExp: ", percentVar[2], "%")) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  coord_fixed(ratio = sd_ratio)
+```
+
+For the normalized Data:
+
+```{r echo=FALSE}
+exp_data<- exprs(rawData)
+PCA <- prcomp(t(exp_data), scale = FALSE)
+
+percentVar <- round(100*PCA$sdev^2/sum(PCA$sdev^2),1)
+sd_ratio <- sqrt(percentVar[2] / percentVar[1])
+
+dataGG <- data.frame(PC1 = PCA$x[,1], PC2 = PCA$x[,2],
+                    Strain =pData(rawData)$Strain,
+                    Week =pData(rawData)$Week)
+pData(norm.data)
+
+ggplot(dataGG, aes(PC1, PC2)) +
+      geom_point(aes(colour =  factor(Week), shape =  Strain)) +
+  ggtitle("PCA plot of raw data") +
+  xlab(paste0("PC1, VarExp: ", percentVar[1], "%")) +
+  ylab(paste0("PC2, VarExp: ", percentVar[2], "%")) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  coord_fixed(ratio = sd_ratio)
+```
+
+# LIMMA differential analysis 
+LIMMA (Linear Models for Microarray Analysis) is a statistical method for identifying differentially expressed genes in microarray experiments. It uses linear models to analyze the intensity values of the genes measured in the microarray, taking into account factors such as the experimental design and the inherent variability of the data. The result of a LIMMA analysis is a list of genes that are significantly differentially expressed between the experimental conditions being compared. 
+
+```{r include=FALSE}
+targets$group<- paste(targets$Strain, targets$Tissue)
+Week <- factor(targets$Weeks, levels = c ("6","12","18","24"))
+Strain <- factor(targets$Strain, levels=c("lpr","lpr2","plus"))
+Tissue <- factor(targets$Tissue, levels=c("Amygdala","Hippocampus","Kidney"))
+Group<- factor(targets$group)
+design<- model.matrix(~0+Group:Week)
+is.fullrank(design) #this checks if there is a dependacy within the ranks. If there is we cannot calculate F-statistic which makes it impossible to extract differentialy expressed genes.
+```
+
+I'm renaming the columns because, make.contrasts throws an error when using ':' and '.'.
+```{r include=FALSE}
+colnames(design)[1]<-'lprAmygdalaW6'
+colnames(design)[2]<-'lprHippocampusW6'
+colnames(design)[3]<-'lprKidneyW6'
+colnames(design)[4]<-'lpr2AmygdalaW6'
+colnames(design)[5]<-'lpr2HippocampusW6'
+colnames(design)[6]<-'lpr2KidneyW6'
+colnames(design)[7]<-'plusAmygdalaW6'
+colnames(design)[8]<-'plusKidneyW6'
+colnames(design)[9]<-'lprAmygdalaW12'
+colnames(design)[10]<-'lprHippocampusW12'
+colnames(design)[11]<-'lprKidneyW12'
+colnames(design)[12]<-'lpr2AmygdalaW12' #
+colnames(design)[13]<-'lpr2HippocampusW12'
+colnames(design)[14]<-'lpr2KidneyW12'
+colnames(design)[15]<-'plusAmygdalaW12'
+colnames(design)[16]<-'plusKidneyW12'
+colnames(design)[17]<-'lprAmygdalaW18'
+colnames(design)[18]<-'lprHippocampusW18'
+colnames(design)[19]<-'lprKidneyW18'
+colnames(design)[20]<-'lpr2AmygdalaW18' #
+colnames(design)[21]<-'lpr2HippocampusW18'
+colnames(design)[22]<-'lpr2KidneyW18'
+colnames(design)[23]<-'plusAmygdalaW18'
+colnames(design)[24]<-'plusKidneyW18' #
+colnames(design)[25]<-'lprAmygdalaW24'
+colnames(design)[26]<-'lprHippocampusW24'
+colnames(design)[27]<-'lprKidneyW24'
+colnames(design)[28]<-'lpr2AmygdalaW24'
+colnames(design)[29]<-'lpr2HippocampusW24'
+colnames(design)[30]<-'lpr2KidneyW24' #
+colnames(design)[31]<-'plusAmygdalaW24'
+colnames(design)[32]<-'plusKidneyW24'
+```
+
+Remove the samples that do not have a value. therefore, the design becomes a full rank.
+```{r}
+design<-design[,-c(12,20,24,30)]
+```
+
+## Linear Model
+In this code, lmFit is used to fit a linear model to the data in norm.data using the design matrix design. This model is then passed to the eBayes function, which applies empirical Bayes moderation to the standard errors of the model.
+```{r}
+fit1 <- lmFit(norm.data, design)
+fit1 <- eBayes(fit1, trend=TRUE, robust=TRUE) # the compute moderated t-statistics, moderated F-statistic, and log-odds of differential expression by empirical Bayes moderation of the standard errors towards a global value. 
+results <- decideTests(fit1)
+summary(results)
+```
+
+
+## Contrast Matrices
+
+```{r echo=TRUE}
+table(targets$Strain, targets$Tissue, targets$Weeks)
+```
+
+Based on the table above the possible comparisions are between 
+    1   -   Amygdala and Hippocampus for LPR vs LPR 2 throughout the weeks 6, 24
+    2   -   LPR Amygdala at Weeks 6, 12, 18, 24 + Vs. Plus
+    3   -   LPR2 Amygdala at Weeks 6, 24 + Vs. Plus
+    4   -   LPR Hippocampus at Weeks 6, 12, 18, 24
+    5   -   LPR2 Hippocampus at Weeks 6, 12, 18, 24
+    6   -   Change in Plus Amygdala throughout the weeks
+    7   -   Kidney LPR Vs LPR2 at Weeks 6, 12, 18
+    8   -   Kidney LPR for the Week 6, 12, 18, 24
+    9   -   Kidney LPR2 for the Week 6, 12, 18
+    10  -   Kidney Plus for the Week 6, 12, 24
+    
+```{r echo=FALSE}
+# Amygdala and Hippocampus for LPR vs LPR 2 throughout the weeks 6, 24
+contrast.matrix1 = makeContrasts(lprAmygdalaW6-lprHippocampusW6,
+                                 lprAmygdalaW6-lpr2AmygdalaW6,
+                                 lprHippocampusW6-lpr2HippocampusW6,
+                                 lpr2AmygdalaW6-lpr2HippocampusW6,
+                                 lprAmygdalaW24-lprHippocampusW24,
+                                 lprAmygdalaW24-lpr2AmygdalaW24,
+                                 lprHippocampusW24-lpr2HippocampusW24,
+                                 lpr2AmygdalaW24-lpr2HippocampusW24,
+                                 levels= colnames(design))
+data.fit.con1 = contrasts.fit(fit1,contrast.matrix1)
+eb.data1 = eBayes(data.fit.con1)
+results1 <- decideTests(eb.data1)
+summary (results1)
+```
+
+```{r echo=FALSE}
+#LPR Amygdala at Weeks 6, 12, 18, 24 + Vs. Plus
+contrast.matrix2 = makeContrasts(lprAmygdalaW6-lprAmygdalaW12,
+                                 lprAmygdalaW6-lprAmygdalaW18,
+                                 lprAmygdalaW6-lprAmygdalaW24,
+                                 lprAmygdalaW6-plusAmygdalaW6,
+                                 lprAmygdalaW12-lprAmygdalaW18,
+                                 lprAmygdalaW12-lprAmygdalaW24,
+                                 lprAmygdalaW12-plusAmygdalaW12,
+                                 lprAmygdalaW18-lprAmygdalaW24,
+                                 lprAmygdalaW18-plusAmygdalaW18,
+                                 lprAmygdalaW24-plusAmygdalaW24,
+                                 levels= colnames(design))
+data.fit.con2 = contrasts.fit(fit1,contrast.matrix2)
+eb.data2 = eBayes(data.fit.con2)
+results2 <- decideTests(eb.data2)
+summary (results2)
+```
+
+```{r echo=FALSE}
+#LPR2 Amygdala at Weeks 6, 24 + Vs. Plus
+contrast.matrix3 = makeContrasts(lpr2AmygdalaW6-lpr2AmygdalaW24,
+                                 lpr2AmygdalaW6-plusAmygdalaW6,
+                                 lprAmygdalaW24-plusAmygdalaW24,
+                                 levels= colnames(design))
+data.fit.con3 = contrasts.fit(fit1,contrast.matrix3)
+eb.data3 = eBayes(data.fit.con3)
+results3 <- decideTests(eb.data3)
+summary (results3)
+```
+
+```{r echo=FALSE}
+#LPR Hippocampus at Weeks 6, 12, 18, 24
+contrast.matrix4 = makeContrasts(lprHippocampusW6-lprHippocampusW12,
+                                 lprHippocampusW6-lprHippocampusW18,
+                                 lprHippocampusW6-lprHippocampusW24,
+                                 lprHippocampusW12-lprHippocampusW18,
+                                 lprHippocampusW12-lprHippocampusW24,
+                                 lprHippocampusW18-lprHippocampusW24,
+                                 levels= colnames(design))
+data.fit.con4 = contrasts.fit(fit1,contrast.matrix4)
+eb.data4 = eBayes(data.fit.con4)
+results4 <- decideTests(eb.data4)
+summary (results4)
+```
+
+```{r echo=FALSE}
+#LPR2 Hippocampus at Weeks 6, 12, 18, 24
+contrast.matrix5 = makeContrasts(lpr2HippocampusW6-lpr2HippocampusW12,
+                                 lpr2HippocampusW6-lpr2HippocampusW18,
+                                 lpr2HippocampusW6-lpr2HippocampusW24,
+                                 lpr2HippocampusW12-lpr2HippocampusW18,
+                                 lpr2HippocampusW12-lpr2HippocampusW24,
+                                 lpr2HippocampusW18-lpr2HippocampusW24,
+                                 levels= colnames(design))
+data.fit.con5 = contrasts.fit(fit1,contrast.matrix5)
+eb.data5 = eBayes(data.fit.con5)
+results5 <- decideTests(eb.data5)
+summary (results5)
+```
+
+```{r echo=FALSE}
+#Change in Plus Amygdala throughout the weeks
+contrast.matrix6 = makeContrasts(plusAmygdalaW6-plusAmygdalaW12,
+                                 plusAmygdalaW6-plusAmygdalaW18,
+                                 plusAmygdalaW6-plusAmygdalaW24,
+                                 plusAmygdalaW12-plusAmygdalaW18,
+                                 plusAmygdalaW12-plusAmygdalaW24,
+                                 plusAmygdalaW18-plusAmygdalaW24,
+                                 levels= colnames(design))
+data.fit.con6 = contrasts.fit(fit1,contrast.matrix6)
+eb.data6 = eBayes(data.fit.con6)
+results6 <- decideTests(eb.data6)
+summary (results6)
+```
+
+
+```{r echo=FALSE}
+#Kidney LPR Vs LPR2 Vs Plus at Weeks 6, 12, 18
+contrast.matrix7 = makeContrasts(lprKidneyW6-lpr2KidneyW6,
+                                 lprKidneyW12-lpr2KidneyW12,
+                                 lprKidneyW18-lpr2KidneyW18,
+                                 levels= colnames(design))
+data.fit.con7 = contrasts.fit(fit1,contrast.matrix7)
+eb.data7 = eBayes(data.fit.con7)
+results7 <- decideTests(eb.data7)
+summary (results7)
+```
+
+```{r echo=FALSE}
+# Kidney LPR for the Week 6, 12, 18, 24  (@W24 n=1) 
+contrast.matrix8 = makeContrasts(lprKidneyW6-lprKidneyW12,
+                                 lprKidneyW6-lprKidneyW18,
+                                 lprKidneyW6-lprKidneyW24,
+                                 lprKidneyW12-lprKidneyW18,
+                                 lprKidneyW12-lprKidneyW24,
+                                 lprKidneyW18-lprKidneyW24,
+                                 levels= colnames(design))
+data.fit.con8 = contrasts.fit(fit1,contrast.matrix8)
+eb.data8 = eBayes(data.fit.con8)
+results8 <- decideTests(eb.data8)
+summary (results8)
+```
+
+
+```{r echo=FALSE}
+# Kidney LPR2 for the Week 6, 12, 18 
+contrast.matrix9 = makeContrasts(lpr2KidneyW6-lpr2KidneyW12,
+                                 lpr2KidneyW6-lpr2KidneyW18,
+                                 lpr2KidneyW12-lpr2KidneyW18,
+                                 levels= colnames(design))
+data.fit.con9 = contrasts.fit(fit1,contrast.matrix9)
+eb.data9 = eBayes(data.fit.con9)
+results9 <- decideTests(eb.data9)
+summary (results9)
+```
+
+```{r echo=FALSE}
+#Kidney Plus for the Week 6, 12, 24 (@W24 n=1)
+contrast.matrix10 = makeContrasts(plusKidneyW6-plusKidneyW12,
+                                 plusKidneyW6-plusKidneyW24,
+                                 plusKidneyW12-plusKidneyW24,
+                                 levels= colnames(design))
+data.fit.con10 = contrasts.fit(fit1,contrast.matrix10)
+eb.data10 = eBayes(data.fit.con10)
+results10 <- decideTests(eb.data10)
+summary (results10)
+```
+
+
+# Extracting significant genes
+
+To extract the significantly expressed genes we create a for loop to go through each coefficient (comparison) for each contrast matrix. We then apply the topTable function to extract genes with Log Fold Change above 1.5.
+
+```{r include=FALSE}
+#Contrast Matrix 1
+t <- data.frame(ID=vector("character",0),
+                 Symbol=vector("character",0),
+                 Name=vector("character",0),
+                Entrez_IDs=vector("character",0),
+                logFC=vector("numeric",0),
+               AveExpr=vector("numeric",0),
+                t=vector("numeric",0),
+                P.Value=vector("numeric",0),
+                adj.P.Val=vector("numeric",0),
+               B=vector("numeric",0))
+mylist <- list()
+for (i in 1 : ncol(eb.data1$coefficients)){
+  mylist[[i]]<-topTable(eb.data1,coef = i, n=Inf, lfc = 1.5)
+  for( ii in length(mylist)){
+   mylist[[ii]]$Contrast<- rep((colnames(eb.data1[[1]])[ii]),nrow(mylist[[ii]]))
+}
+}
+gene_comp1<- do.call(rbind.data.frame,mylist)
+```
+
+
+```{r include=FALSE}
+#Contrast Matrix 2
+t <- data.frame(ID=vector("character",0),
+                 Symbol=vector("character",0),
+                 Name=vector("character",0),
+                Entrez_IDs=vector("character",0),
+                logFC=vector("numeric",0),
+               AveExpr=vector("numeric",0),
+                t=vector("numeric",0),
+                P.Value=vector("numeric",0),
+                adj.P.Val=vector("numeric",0),
+               B=vector("numeric",0))
+mylist <- list()
+for (i in 1 : ncol(eb.data2$coefficients)){
+  mylist[[i]]<-topTable(eb.data2,coef = i, n=Inf, lfc = 1.5)
+  for( ii in length(mylist)){
+   mylist[[ii]]$Contrast<- rep((colnames(eb.data2[[1]])[ii]),nrow(mylist[[ii]]))
+}
+}
+gene_comp2<- do.call(rbind.data.frame,mylist)
+```
+
+
+
+```{r include=FALSE}
+#Contrast Matrix 3
+t <- data.frame(ID=vector("character",0),
+                 Symbol=vector("character",0),
+                 Name=vector("character",0),
+                Entrez_IDs=vector("character",0),
+                logFC=vector("numeric",0),
+               AveExpr=vector("numeric",0),
+                t=vector("numeric",0),
+                P.Value=vector("numeric",0),
+                adj.P.Val=vector("numeric",0),
+               B=vector("numeric",0))
+mylist <- list()
+for (i in 1 : ncol(eb.data3$coefficients)){
+  mylist[[i]]<-topTable(eb.data3,coef = i, n=Inf, lfc = 1.5)
+  for( ii in length(mylist)){
+   mylist[[ii]]$Contrast<- rep((colnames(eb.data3[[1]])[ii]),nrow(mylist[[ii]]))
+}
+}
+gene_comp3<- do.call(rbind.data.frame,mylist)
+```
+
+
+
+```{r include=FALSE}
+#Contrast Matrix 4
+t <- data.frame(ID=vector("character",0),
+                 Symbol=vector("character",0),
+                 Name=vector("character",0),
+                Entrez_IDs=vector("character",0),
+                logFC=vector("numeric",0),
+               AveExpr=vector("numeric",0),
+                t=vector("numeric",0),
+                P.Value=vector("numeric",0),
+                adj.P.Val=vector("numeric",0),
+               B=vector("numeric",0))
+mylist <- list()
+for (i in 1 : ncol(eb.data4$coefficients)){
+  mylist[[i]]<-topTable(eb.data4,coef = i, n=Inf, lfc = 1.5)
+  for( ii in length(mylist)){
+  mylist[[ii]]$Contrast<- rep((colnames(eb.data4[[1]])[ii]),nrow(mylist[[ii]]))
+}
+}
+gene_comp4<- do.call(rbind.data.frame,mylist)
+```
+
+
+```{r include=FALSE}
+#Contrast Matrix 5
+t <- data.frame(ID=vector("character",0),
+                 Symbol=vector("character",0),
+                 Name=vector("character",0),
+                Entrez_IDs=vector("character",0),
+                logFC=vector("numeric",0),
+               AveExpr=vector("numeric",0),
+                t=vector("numeric",0),
+                P.Value=vector("numeric",0),
+                adj.P.Val=vector("numeric",0),
+               B=vector("numeric",0))
+mylist <- list()
+for (i in 1 : ncol(eb.data5$coefficients)){
+  mylist[[i]]<-topTable(eb.data5,coef = i, n=Inf, lfc = 1.5)
+  for( ii in length(mylist)){
+  mylist[[ii]]$Contrast<- rep((colnames(eb.data5[[1]])[ii]),nrow(mylist[[ii]]))
+}
+}
+gene_comp5<- do.call(rbind.data.frame,mylist)
+```
+
+
+
+```{r include=FALSE}
+#Contrast Matrix 6
+t <- data.frame(ID=vector("character",0),
+                 Symbol=vector("character",0),
+                 Name=vector("character",0),
+                Entrez_IDs=vector("character",0),
+                logFC=vector("numeric",0),
+               AveExpr=vector("numeric",0),
+                t=vector("numeric",0),
+                P.Value=vector("numeric",0),
+                adj.P.Val=vector("numeric",0),
+               B=vector("numeric",0))
+mylist <- list()
+for (i in 1 : ncol(eb.data6$coefficients)){
+  mylist[[i]]<-topTable(eb.data6,coef = i, n=Inf, lfc = 1.5)
+  for( ii in length(mylist)){
+   mylist[[ii]]$Contrast<- rep((colnames(eb.data6[[1]])[ii]),nrow(mylist[[ii]]))
+}
+}
+gene_comp6<- do.call(rbind.data.frame,mylist)
+```
+
+
+
+```{r include=FALSE}
+#Contrast Matrix 7
+t <- data.frame(ID=vector("character",0),
+                 Symbol=vector("character",0),
+                 Name=vector("character",0),
+                Entrez_IDs=vector("character",0),
+                logFC=vector("numeric",0),
+               AveExpr=vector("numeric",0),
+                t=vector("numeric",0),
+                P.Value=vector("numeric",0),
+                adj.P.Val=vector("numeric",0),
+               B=vector("numeric",0))
+mylist <- list()
+for (i in 1 : ncol(eb.data7$coefficients)){
+  mylist[[i]]<-topTable(eb.data7,coef = i, n=Inf, lfc = 1.5)
+  for( ii in length(mylist)){
+  mylist[[ii]]$Contrast<- rep((colnames(eb.data7[[1]])[ii]),nrow(mylist[[ii]]))
+}
+}
+gene_comp7<- do.call(rbind.data.frame,mylist)
+```
+
+
+```{r include=FALSE}
+#Contrast Matrix 8
+t <- data.frame(ID=vector("character",0),
+                 Symbol=vector("character",0),
+                 Name=vector("character",0),
+                Entrez_IDs=vector("character",0),
+                logFC=vector("numeric",0),
+               AveExpr=vector("numeric",0),
+                t=vector("numeric",0),
+                P.Value=vector("numeric",0),
+                adj.P.Val=vector("numeric",0),
+               B=vector("numeric",0))
+mylist <- list()
+for (i in 1 : ncol(eb.data8$coefficients)){
+  mylist[[i]]<-topTable(eb.data8,coef = i, n=Inf, lfc = 1.5)
+  for( ii in length(mylist)){
+   mylist[[ii]]$Contrast<- rep((colnames(eb.data8[[1]])[ii]),nrow(mylist[[ii]]))
+}
+}
+gene_comp8<- do.call(rbind.data.frame,mylist)
+```
+
+
+```{r include=FALSE}
+#Contrast Matrix 9
+t <- data.frame(ID=vector("character",0),
+                 Symbol=vector("character",0),
+                 Name=vector("character",0),
+                Entrez_IDs=vector("character",0),
+                logFC=vector("numeric",0),
+               AveExpr=vector("numeric",0),
+                t=vector("numeric",0),
+                P.Value=vector("numeric",0),
+                adj.P.Val=vector("numeric",0),
+               B=vector("numeric",0))
+mylist <- list()
+for (i in 1 : ncol(eb.data9$coefficients)){
+  mylist[[i]]<-topTable(eb.data9,coef = i, n=Inf, lfc = 1.5)
+  for( ii in length(mylist)){
+   mylist[[ii]]$Contrast<- rep((colnames(eb.data9[[1]])[ii]),nrow(mylist[[ii]]))
+}
+}
+gene_comp9<- do.call(rbind.data.frame,mylist)
+```
+
+
+```{r include=FALSE}
+#Contrast Matrix 10
+t <- data.frame(ID=vector("character",0),
+                 Symbol=vector("character",0),
+                 Name=vector("character",0),
+                Entrez_IDs=vector("character",0),
+                logFC=vector("numeric",0),
+               AveExpr=vector("numeric",0),
+                t=vector("numeric",0),
+                P.Value=vector("numeric",0),
+                adj.P.Val=vector("numeric",0),
+               B=vector("numeric",0))
+mylist <- list()
+for (i in 1 : ncol(eb.data10$coefficients)){
+  mylist[[i]]<-topTable(eb.data10,coef = i, n=Inf, lfc = 1.5)
+  for( ii in length(mylist)){
+   mylist[[ii]]$Contrast<- rep((colnames(eb.data10[[1]])[ii]),nrow(mylist[[ii]]))
+}
+}
+gene_comp10<- do.call(rbind.data.frame,mylist)
+```
+
+# Biological interpretation of differential expression
+
+## Volcano Plot
+
+Volcano plots plot the negative logarithm of the p-value on the y-axis and the logarithm of the fold change on the x-axis, with genes that are significantly differentially expressed appearing as points above a threshold line on the plot. This allows for quick visualization of which genes are most significantly differentially expressed, as well as their direction of expression change. 
+
+We use the cutoff LFC 1.5 and P-value < 0.1
+```{r include=FALSE}
+# List the eb.data names in one list this list will be used as length for For loops moving forward
+eb_names<- list("eb.data1","eb.data2","eb.data3","eb.data4","eb.data5","eb.data6","eb.data7","eb.data8","eb.data9","eb.data10")
+```
+
+
+```{r echo=FALSE}
+# Loop through the eb_names arrays and assign each array to data.eb
+for (i in 1:length(eb_names)){
+  # Assign the current array to data.eb
+  if(i == 1){
+    data.eb <- eb.data1
+  }else if ( i == 2)
+  {
+    data.eb <- eb.data2
+  }else if ( i == 3)
+  {
+    data.eb <- eb.data3
+  }else if ( i == 4)
+  {
+    data.eb <- eb.data4
+  }else if ( i == 5)
+  {
+    data.eb <- eb.data5
+  }else if ( i == 6)
+  {
+    data.eb <- eb.data6
+  }else if ( i == 7)
+  {
+    data.eb <- eb.data7
+  }else if ( i == 8)
+  {
+    data.eb <- eb.data8
+  }else if ( i == 9)
+  {
+    data.eb <- eb.data9
+  }else if ( i == 10)
+  {
+    data.eb <- eb.data10
+  }
+
+  # Generate a volcano plot for each column in data.eb
+  for (ii in 1 : length(colnames(data.eb[[1]]))){
+    tryCatch({
+    # Identify significant genes with log fold change > 1.5 and < 0.1 significance
+    signif_genes <- topTable(data.eb,coef=ii,number=Inf,p.value = 0.1,lfc=1.5)
+    # Create a title for the plot
+    title <- paste(sprintf("%d features pass our cutoffs", nrow(signif_genes)), colnames(data.eb[[1]])[ii])
+    # Generate the volcano plot using the `volcanoplot()` function
+    volcanoplot(data.eb, coef=ii, main=title)
+    # Add the significant genes to the plot using the `points()` function
+    points(signif_genes[['logFC']], -log10(signif_genes[['P.Value']]), col=2)
+    
+  }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+  }
+}
+
+```
+
+
+## Heatmap
+
+Heatmaps are often used to visualize the expression levels of genes across a set of samples. This can be useful for identifying patterns and trends in the data, such as which genes are co-expressed or differentially expressed between groups of samples. 
+
+```{r echo=FALSE}
+for (i in 1:length(eb_names)){
+   if(i == 1){
+    data.eb<- eb.data1
+  }else if ( i == 2)
+  {
+    data.eb <- eb.data2
+  }else if ( i == 3)
+  {
+    data.eb <- eb.data3
+  }else if ( i == 4)
+  {
+    data.eb <- eb.data4
+  }else if ( i == 5)
+  {
+    data.eb <- eb.data5
+  }else if ( i == 6)
+  {
+    data.eb <- eb.data6
+  }else if ( i == 7)
+  {
+    data.eb <- eb.data7
+  }else if ( i == 8)
+  {
+    data.eb <- eb.data8
+  }else if ( i == 9)
+  {
+    data.eb <- eb.data9
+  }else if ( i == 10)
+  {
+    data.eb <- eb.data10
+  }
+diffexpIDs <- as.character(topTable(data.eb,number= 50,lfc=1.5)$ID)
+r2<-as.character(topTable(data.eb,number= 50,lfc=1.5)$Symbol)
+diffexprows <- which(featureNames(norm.data)%in% diffexpIDs)
+normexprs<-exprs(norm.data)
+heatmap(normexprs[diffexprows,],col=greenred(100),scale="row", labRow = c(r2))
+}
+
+```
+
+## topGO
+topGO is an R package used to perform Gene Ontology (GO) enrichment analysis. GO enrichment analysis can be used to identify which GO terms are significantly overrepresented in a set of genes of interest.
+The output from the topGO analysis has been saved in a PDFs and is available in the data folder.
+Rectangle color represents the relative significant, ranging from dark red (most significant) to bright yellow (least significant).
+
+```{r eval=FALSE, include=FALSE}
+# #save the names of the possible gene ontology domains
+# Ont_names <- c("BP","MF","CC")
+# 
+# #for loop to create a top go object foe each comparision and create an enrichment analysis
+# for (i in 1:length(eb_names)){
+#   tryCatch({ #print error, DONOT stop code execution
+#   if(i == 1){
+#     data.eb<- eb.data1
+#   }else if ( i == 2)
+#   {
+#     data.eb <- eb.data2
+#   }else if ( i == 3)
+#   {
+#     data.eb <- eb.data3
+#   }else if ( i == 4)
+#   {
+#     data.eb <- eb.data4
+#   }else if ( i == 5)
+#   {
+#     data.eb <- eb.data5
+#   }else if ( i == 6)
+#   {
+#     data.eb <- eb.data6
+#   }else if ( i == 7)
+#   {
+#     data.eb <- eb.data7
+#   }else if ( i == 8)
+#   {
+#     data.eb <- eb.data8
+#   }else if ( i == 9)
+#   {
+#     data.eb <- eb.data9
+#   }else if ( i == 10)
+#   {
+#     data.eb <- eb.data10
+#   }
+# 
+#   for (ii in 1 : length(colnames(data.eb[[1]]))){
+#     table_temp<- topTable(data.eb, coef=(colnames(data.eb[[1]])[ii]), n=Inf)
+#     DE_genes<- subset(table_temp, adj.P.Val < 0.1)$ID
+#     #Identify if there are background genes that contrbute to DE if so remove them and isolate only DE
+#     back_ID <- genefilter::genefinder(norm.data, 
+#                                             as.character(DE_genes), 
+#                                             method = "manhattan", scale = "none")
+#     back_ID <- sapply(back_ID, function(x)x$indices)
+#     back_genes <- featureNames(norm.data)[back_ID]
+#     back_genes <- setdiff(back_genes, DE_genes)
+# 
+#     gene_IDs <- rownames(table_temp)
+#     in_universe <- gene_IDs %in% c(DE_genes, back_genes)
+#     in_selection <- gene_IDs %in% DE_genes 
+#     all_genes <- in_selection[in_universe]
+#     all_genes <- factor(as.integer(in_selection[in_universe]))
+#     names(all_genes) <- gene_IDs[in_universe] 
+#     
+#           for (k in 1:length(Ont_names)){
+#                 top_GO_data <- new("topGOdata", ontology = Ont_names[k], allGenes = all_genes,
+#          nodeSize = 10, annot = annFUN.db, affyLib = "mogene11sttranscriptcluster.db")
+#                 
+#         #Cutoffs at p=0.01 by default
+#         result_top_GO_elim <- 
+#           runTest(top_GO_data, algorithm = "elim", statistic = "Fisher")
+#         result_top_GO_classic <- 
+#           runTest(top_GO_data, algorithm = "classic", statistic = "Fisher")
+#             
+#         res_top_GO <- GenTable(top_GO_data, Fisher.elim = result_top_GO_elim,
+#         Fisher.classic = result_top_GO_classic,
+#         orderBy = "Fisher.elim" , topNodes = 100)
+# 
+#         genes_top_GO <- printGenes(top_GO_data, whichTerms = res_top_GO$GO.ID,
+#             chip = "mogene11sttranscriptcluster.db", geneCutOff = 1000)
+#         
+#         
+#         res_top_GO$sig_genes <- sapply(genes_top_GO, function(x){
+#                         str_c(paste0(x[x$'raw p-value' == 2, "Symbol.id"],";"), 
+#                               collapse = "")
+#             })
+#         #head(res_top_GO[,1:8], 100)
+#         #showSigOfNodes(top_GO_data, score(result_top_GO_elim), firstSigNodes = 10,useInfo = 'def')
+#         name<- paste((colnames(data.eb[[1]])[ii]),"Coef, Ont:",Ont_names[k])
+#       printGraph(top_GO_data, result_top_GO_elim, firstSigNodes = 5, fn.prefix = name, useInfo = "all", pdfSW = TRUE)
+#           }
+# 
+#   }                                                               
+# }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+# }
+
+```
+
+## Reactome
+Reactome is a database of biological pathways, which provides detailed information about the molecular events that take place in cells. We use the 'ReactomePA' package for performing enrichment analysis on sets of genes or proteins to identify pathways that are significantly enriched in the data.
+The output from the Reactome analysis has been saved in a PDFs and is available in the data folder.
+```{r eval=FALSE, include=FALSE}
+# 
+# for (i in 1:length(eb_names)){
+#   tryCatch({ #print error, DONOT stop code execution
+#       if(i == 1){
+#         data.eb<- eb.data1
+#       }else if ( i == 2)
+#       {
+#         data.eb <- eb.data2
+#       }else if ( i == 3)
+#       {
+#         data.eb <- eb.data3
+#       }else if ( i == 4)
+#       {
+#         data.eb <- eb.data4
+#       }else if ( i == 5)
+#       {
+#         data.eb <- eb.data5
+#       }else if ( i == 6)
+#       {
+#         data.eb <- eb.data6
+#       }else if ( i == 7)
+#       {
+#         data.eb <- eb.data7
+#       }else if ( i == 8)
+#       {
+#         data.eb <- eb.data8
+#       }else if ( i == 9)
+#       {
+#         data.eb <- eb.data9
+#       }else if ( i == 10)
+#       {
+#         data.eb <- eb.data10
+#       }
+#          for (ii in 1 : length(colnames(data.eb[[1]]))){
+#         table_temp<- topTable(data.eb, coef=(colnames(data.eb[[1]])[ii]), n=Inf)
+#         DE_genes<- subset(table_temp, adj.P.Val < 0.1)$ID
+#         back_id <- genefilter::genefinder(norm.data, 
+#                                                 as.character(DE_genes), 
+#                                                 method = "manhattan", scale = "none")
+#         back_id <- sapply(back_id, function(x)x$indices)
+#         back_genes <- featureNames(norm.data)[back_id]
+#         back_genes <- setdiff(back_genes, DE_genes)
+#         
+#         entrez_ids <- mapIds(mogene11sttranscriptcluster.db, 
+#               keys = rownames(table_temp), 
+#               keytype = "PROBEID",
+#               column = "ENTREZID")
+#         
+#         reactome_enrich <- enrichPathway(gene = entrez_ids[DE_genes], 
+#                                         universe = entrez_ids[c(DE_genes, 
+#                                                                 back_genes)],
+#                                         organism = "mouse",
+#                                         pvalueCutoff = 0.05,
+#                                         qvalueCutoff = 0.9, 
+#                                         readable = TRUE)
+#         
+#         reactome_enrich@result$Description <- paste0(str_sub(
+#                                             reactome_enrich@result$Description, 1, 20),
+#                                             "...")
+#         #head(as.data.frame(reactome_enrich))[1:6]
+#   
+#               title<- paste("Reactome pathway:",(colnames(data.eb[[1]])[ii]),sep="")
+#               reactome_enrich <- pairwise_termsim(reactome_enrich)
+#               b<-barplot(reactome_enrich)
+#               e<-emapplot(reactome_enrich, showCategory = 10)
+#               pdf(file= title)
+#               print(b)
+#               print(e)
+#               dev.off()
+#                     
+#         }
+#   }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+# }
+
+```
+
+
+# Final Annotation and Exporting
+
+## NCBI summary
+
+```{r include=FALSE}
+#Remove NA from the gene list since it will throw an error later 
+cgene_comp1<- na.omit(gene_comp1)
+cgene_comp2<- na.omit(gene_comp2)
+cgene_comp3<- na.omit(gene_comp3)
+cgene_comp4<- na.omit(gene_comp4)
+cgene_comp5<- na.omit(gene_comp5)
+cgene_comp6<- na.omit(gene_comp6)
+cgene_comp7<- na.omit(gene_comp7)
+cgene_comp8<- na.omit(gene_comp8)
+cgene_comp9<- na.omit(gene_comp9)
+cgene_comp10<- na.omit(gene_comp10)
+cgene_names<- c("cgene_comp1","cgene_comp2","cgene_comp3","cgene_comp4","cgene_comp5","cgene_comp6","cgene_comp7","cgene_comp8","cgene_comp9","cgene_comp10")
+```
+
+The Following code runs through the genes extracted and grabs the NCBI summary/abstract from the NCBI website. However, it is extremely slow taking about 2 seconds per gene and there are close to 80,000 Genes to be referenced. I have left it commented out. You can run it bu removing the #s (ctrl-shift-c). 
+```{r eval=FALSE, include=FALSE}
+# 
+# for (i in 1:length(cgene_names)){
+#   print(i)
+#   tryCatch({
+#   if(i == 1){
+#     data.cgene<- cgene_comp1
+#   }else if ( i == 2)
+#   {
+#     data.cgene<- cgene_comp2
+#   }else if ( i == 3)
+#   {
+#     data.cgene<- cgene_comp
+#   }else if ( i == 4)
+#   {
+#     data.cgene<- cgene_comp4
+#   }else if ( i == 5)
+#   {
+#    data.cgene<- cgene_comp5
+#   }else if ( i == 6)
+#   {
+#     data.cgene<- cgene_comp6
+#   }else if ( i == 7)
+#   {
+#     data.cgene<- cgene_comp7
+#   }else if ( i == 8)
+#   {
+#     data.cgene<- cgene_comp8
+#   }else if ( i == 9)
+#   {
+#     data.cgene<- cgene_comp9
+#   }else if ( i == 10)
+#   {
+#     data.cgene<- cgene_comp10
+#   }
+#     
+# EIDs<- data.cgene$Entrez_IDs
+# text.vec <- vector()
+# for (ii in 1:length(EIDs)) {  tryCatch({
+# 
+#   string <- paste0("https://www.ncbi.nlm.nih.gov/gene/?term=",EIDs[ii])
+#   text.vec[ii] <- read_html(string) %>% html_nodes(xpath='//*[@id="summaryDl"]/dd[10]')%>% html_text()
+#   }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+#   
+# }
+# 
+# if(i == 1){
+#    cgene_comp1<- cbind(cgene_comp1,text.vec)
+#   }else if ( i == 2)
+#   {
+#     cgene_comp2<- cbind(cgene_comp2,text.vec)
+#   }else if ( i == 3)
+#   {
+#     cgene_comp3<- cbind(cgene_comp3,text.vec)
+#   }else if ( i == 4)
+#   {
+#     cgene_comp4<- cbind(cgene_comp4,text.vec)
+#   }else if ( i == 5)
+#   {
+#   cgene_comp5<- cbind(cgene_comp5,text.vec)
+#   }else if ( i == 6)
+#   {
+#    cgene_comp6<- cbind(cgene_comp6,text.vec)
+#   }else if ( i == 7)
+#   {
+#     cgene_comp7<- cbind(cgene_comp7,text.vec)
+#   }else if ( i == 8)
+#   {
+#    cgene_comp8<- cbind(cgene_comp8,text.vec)
+#   }else if ( i == 9)
+#   {
+#     cgene_comp9<- cbind(cgene_comp9,text.vec)
+#   }else if ( i == 10)
+#   {
+#     cgene_comp10<- cbind(cgene_comp10,text.vec)
+#   }
+# }, error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+# }
+```
+
+In the meantime, I've explored running the loop in parallel using the NCBI api. It is faster and more efficient. Average run time is 50 seconds per 200 genes using parlapply (parallel version of lapply). You can run the code below by switching which cgene_comp to use.
+
+```{r}
+# # Set the number of cores to use for parallel processing
+# # Don't use all your core's your computer WILL crash. I've left 2 for the OS. 
+# par_data<- cgene_comp9 #change to comparison of interest
+# ncores <- (detectCores()-2)
+# 
+# # Initialize a parallel backend
+# cl <- makeCluster(ncores)
+# entrez_ids <- par_data$Entrez_IDs 
+# 
+# # Use parLapply to run the API calls in parallel
+# summary_text <- parLapply(cl, entrez_ids, function(entrez_id) {
+#   #pass the required package to the worker nodes
+#   library("httr")
+#   library("RCurl")
+#   library("XML")
+#     #api_key generated from NCBI. If you don't have one, you can create an account with NCBI and generate one
+#     api_key <- readLines("api.txt")
+#     url <- paste0("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/esummary.fcgi?db=gene&id=",
+#                   entrez_id, "&api_key=", api_key)
+#     response <- getURL(url, ssl.verifypeer = FALSE)
+#     # Pause for 1 second after each API request limit of 10 requests per second or your API gets banned
+#     Sys.sleep(1)
+#     # Parse the XML data in the response
+#     gene_summary <- xmlParse(response)
+#     # Extract the summary information from the XML data
+#     # (Note: the exact method for extracting the information will depend on the structure of the XML data)
+#     summary_text_list <- xmlToList(gene_summary)
+#     summary_text_comp9<- summary_text_list[["DocumentSummarySet"]][["DocumentSummary"]][["Summary"]] #change name to match comparison of interest
+# })
+# 
+# # Stop the parallel backend when done
+# stopCluster(cl)
+
+```
+
+
+```{r eval=FALSE, include=FALSE}
+Description<- vector()
+for (i in 1:nrow(cgene_comp9)){
+     tryCatch({
+Description[i]<- summary_text[[i]]
+},  error=function(e){cat("ERROR :",conditionMessage(e), "\n")})
+}
+```
+
+
+## GO annotation
+The gene ontology annotation takes a long time as well. I have not found an API to make it faster, but a parallel version is a work in progress. 
+```{r eval=FALSE, include=FALSE}
+# for (i in length(cgene_names)){
+#    tryCatch({
+#   if(i == 1){
+#     data.cgene<- cgene_comp1
+#   }else if ( i == 2)
+#   {
+#     data.cgene<- cgene_comp2
+#   }else if ( i == 3)
+#   {
+#     data.cgene<- cgene_comp3
+#   }else if ( i == 4)
+#   {
+#     data.cgene<- cgene_comp4
+#   }else if ( i == 5)
+#   {
+#    data.cgene<- cgene_comp5
+#   }else if ( i == 6)
+#   {
+#     data.cgene<- cgene_comp6
+#   }else if ( i == 7)
+#   {
+#     data.cgene<- cgene_comp7
+#   }else if ( i == 8)
+#   {
+#     data.cgene<- cgene_comp8
+#   }else if ( i == 9)
+#   {
+#     data.cgene<- cgene_comp9
+#   }else if ( i == 10)
+#   {
+#     data.cgene<- cgene_comp10
+#   }
+# len<-length(data.cgene$ID)
+# go<-mget(c(data.cgene$ID), envir=mogene11sttranscriptclusterGO)
+# names(go)<-c(data.cgene$Symbol)
+# 
+# df <- data.frame(gene=vector("character",0),
+#                  GOID=vector("character",0),
+#                  term=vector("character",0))
+# 
+# for(index1 in 1:length(go)) {
+#        tryCatch({
+#   for(index2 in 1:length(go[[index1]])) {
+#     GIDs<- names(go[[index1]])[[index2]]
+#     df <- rbind(df,c(names(go)[[index1]],names(go[[index1]])[[index2]],(go[[index1]][[index2]]["Ontology"][[1]])))
+# 
+#     text.vec <- vector()
+#     c_GIDs<- df[,c(2)]
+#         for (ii in 1:length(c_GIDs)) {
+#         
+#         string <- paste0("http://amigo.geneontology.org/amigo/term/",c_GIDs[ii])
+#         text.vec[ii] <- read_html(string) %>% html_nodes(xpath='/html/body/div[2]/div[1]/h1')%>%html_text()
+#           }
+#   }
+#   }, error=function(e){cat("ERROR 1:",conditionMessage(e), "\n")})
+# }
+# 
+#   if(i == 1){
+#    ago_comp1<- cbind(df,text.vec)
+#   }else if ( i == 2)
+#   {
+#     ago_comp2<- cbind(df,text.vec)
+#   }else if ( i == 3)
+#   {
+#     ago_comp3<- cbind(df,text.vec)
+#   }else if ( i == 4)
+#   {
+#     ago_comp4<- cbind(df,text.vec)
+#   }else if ( i == 5)
+#   {
+#   ago_comp5<- cbind(df,text.vec)
+#   }else if ( i == 6)
+#   {
+#    ago_comp6<- cbind(df,text.vec)
+#   }else if ( i == 7)
+#   {
+#     ago_comp7<- cbind(df,text.vec)
+#   }else if ( i == 8)
+#   {
+#    ago_comp8<- cbind(df,text.vec)
+#   }else if ( i == 9)
+#   {
+#     ago_comp9<- cbind(df,text.vec)
+#   }else if ( i == 10)
+#   {
+#     ago_comp10<- cbind(df,text.vec)
+#   }
+# }, error=function(e){cat("ERROR 2:",conditionMessage(e), "\n")})
+#   
+# }
+
+```
+
+
+# Export files
+The data extracted from the analysis was exported as excel files for easier visualization outside of R Studio. 
+```{r eval=FALSE, include=FALSE}
+#writexl::write_xlsx(cgene_comp10,"/Users/brookt/Downloads/cgene_comp10.xlsx" )
+```
+
+
